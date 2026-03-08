@@ -423,6 +423,13 @@ def get_status(user: dict = Depends(get_optional_user)):
     }
 
 
+@app.post("/api/pipeline/reset")
+def reset_pipeline(user: dict = Depends(get_current_user)):
+    ps = PipelineState()
+    ps.set(running=False, progress="Reset by user", jobs_found=0, jobs_tailored=0, jobs_applied=0)
+    return {"message": "Pipeline reset"}
+
+
 @app.get("/api/config-check")
 def config_check():
     return {

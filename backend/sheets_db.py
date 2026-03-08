@@ -40,6 +40,10 @@ def _get_sheet():
     return client.open_by_key(sheet_id)
 
 
+USER_HEADERS_INIT = ["id", "email", "password_hash", "name", "created_at",
+                     "last_scrape_at", "resume_text", "target_role", "target_location"]
+
+
 def init_sheets():
     """Create tabs and headers if they don't exist."""
     wb = _get_sheet()
@@ -52,6 +56,9 @@ def init_sheets():
         ps = wb.add_worksheet("Pipeline", rows=10, cols=4)
         ps.append_row(["running", "progress", "jobs_found", "jobs_tailored", "jobs_applied"])
         ps.append_row(["false", "idle", "0", "0", "0"])
+    if "Users" not in titles:
+        us = wb.add_worksheet("Users", rows=500, cols=len(USER_HEADERS_INIT))
+        us.append_row(USER_HEADERS_INIT)
 
 
 def _row_to_dict(row: list, include_resume=False) -> dict:

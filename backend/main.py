@@ -86,11 +86,17 @@ class LoginRequest(BaseModel):
 
 @app.post("/api/auth/signup")
 def signup(body: SignupRequest):
-    if get_user_by_email(body.email):
-        raise HTTPException(status_code=400, detail="Email already registered")
-    user = create_user(body.email, body.password, body.name)
-    token = create_token(user["id"], user["email"])
-    return {"token": token, "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
+    try:
+        if get_user_by_email(body.email):
+            raise HTTPException(status_code=400, detail="Email already registered")
+        user = create_user(body.email, body.password, body.name)
+        token = create_token(user["id"], user["email"])
+        return {"token": token, "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Signup error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
 
 
 @app.post("/api/auth/login")

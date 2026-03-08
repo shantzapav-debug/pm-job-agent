@@ -151,4 +151,6 @@ export const jobsApi = {
   delete: (id: number) => api.delete(`/api/jobs/${id}`),
 
   status: () => api.get<StatusData>('/api/status'),
+
+  resumePdfUrl: (id: number) => `${API_BASE}/api/jobs/${id}/resume/pdf`,
 };

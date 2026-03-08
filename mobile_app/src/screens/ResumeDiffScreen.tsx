@@ -3,12 +3,16 @@ import {
   ActivityIndicator, Alert, ScrollView, Share,
   StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
-import { ResumeData, jobsApi } from '../services/api';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { ResumeData, jobsApi, API_BASE } from '../services/api';
 
 export default function ResumeDiffScreen({ route }: any) {
   const { jobId } = route.params;
   const [data, setData] = useState<ResumeData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const [view, setView] = useState<'changes' | 'tailored' | 'original'>('changes');
 
   useEffect(() => {
@@ -17,6 +21,41 @@ export default function ResumeDiffScreen({ route }: any) {
       .catch(() => Alert.alert('Error', 'Failed to load resume data'))
       .finally(() => setLoading(false));
   }, [jobId]);
+
+  async function downloadPdf() {
+    if (!data) return;
+    setPdfLoading(true);
+    try {
+      const token = await AsyncStorage.getItem('auth_token');
+      const url = `${API_BASE}/api/jobs/${jobId}/resume/pdf`;
+      const fileName = `resume_${data.company}_${data.title}.pdf`.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fileUri = FileSystem.cacheDirectory + fileName;
+
+      const dl = await FileSystem.downloadAsync(url, fileUri, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (dl.status !== 200) {
+        Alert.alert('Error', 'Could not generate PDF');
+        return;
+      }
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(dl.uri, {
+          mimeType: 'application/pdf',
+          dialogTitle: `Resume for ${data.title} @ ${data.company}`,
+          UTI: 'com.adobe.pdf',
+        });
+      } else {
+        Alert.alert('Saved', `PDF saved to: ${dl.uri}`);
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Download failed');
+    } finally {
+      setPdfLoading(false);
+    }
+  }
 
   if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#2563eb" /></View>;
   if (!data) return <View style={styles.center}><Text>No data</Text></View>;
@@ -130,13 +169,24 @@ export default function ResumeDiffScreen({ route }: any) {
         <View style={styles.content}>
           {view === 'tailored' && !!data.tailored_resume_text && (
             <TouchableOpacity
+              style={styles.pdfBtn}
+              onPress={downloadPdf}
+              disabled={pdfLoading}
+            >
+              {pdfLoading
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.pdfBtnText}>Download as PDF</Text>}
+            </TouchableOpacity>
+          )}
+          {view === 'tailored' && !!data.tailored_resume_text && (
+            <TouchableOpacity
               style={styles.shareBtn}
               onPress={() => Share.share({
                 title: `Resume for ${data.title} @ ${data.company}`,
                 message: data.tailored_resume_text,
               })}
             >
-              <Text style={styles.shareBtnText}>Share / Copy Tailored Resume</Text>
+              <Text style={styles.shareBtnText}>Copy Text</Text>
             </TouchableOpacity>
           )}
           <View style={styles.resumeBox}>
@@ -179,8 +229,10 @@ const styles = StyleSheet.create({
   changeText: { fontSize: 12, color: '#334155', lineHeight: 17 },
   arrow: { fontSize: 16, color: '#94a3b8', marginTop: 18 },
   reason: { fontSize: 12, color: '#0369a1', marginTop: 8, fontStyle: 'italic' },
-  shareBtn: { backgroundColor: '#2563eb', borderRadius: 10, padding: 12, alignItems: 'center', marginBottom: 10 },
-  shareBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  pdfBtn: { backgroundColor: '#16a34a', borderRadius: 10, padding: 13, alignItems: 'center', marginBottom: 8 },
+  pdfBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  shareBtn: { backgroundColor: '#2563eb', borderRadius: 10, padding: 11, alignItems: 'center', marginBottom: 10 },
+  shareBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
   resumeBox: { backgroundColor: '#fff', borderRadius: 10, padding: 16 },
   resumeText: { fontSize: 12, color: '#334155', lineHeight: 19, fontFamily: 'monospace' },
 });

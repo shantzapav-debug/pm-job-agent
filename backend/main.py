@@ -12,8 +12,14 @@ import pdfplumber
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 from agents.auto_apply import try_apply
 from agents.job_scraper import scrape_all_jobs
@@ -305,6 +311,67 @@ def get_resume(job_id: int, user: dict = Depends(get_current_user)):
         "change_percentage": job.get("change_percentage", 0),
         "keywords_added": job.get("keywords_added", []),
     }
+
+
+@app.get("/api/jobs/{job_id}/resume/pdf")
+def download_resume_pdf(job_id: int, user: dict = Depends(get_current_user)):
+    db = SheetsDB()
+    job = db.get_job(job_id, include_resume=True, user_id=user["id"])
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    text = job.get("tailored_resume_text") or job.get("original_resume_text") or ""
+    if not text.strip():
+        raise HTTPException(status_code=404, detail="No resume text available for this job")
+
+    buf = _build_resume_pdf(text, job.get("title", ""), job.get("company", ""))
+    safe_name = f"resume_{job.get('company', 'job')}_{job.get('title', '')}.pdf".replace(" ", "_")
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
+def _build_resume_pdf(resume_text: str, role: str, company: str) -> io.BytesIO:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+        topMargin=0.75 * inch, bottomMargin=0.75 * inch,
+    )
+    styles = getSampleStyleSheet()
+    normal = ParagraphStyle("body", parent=styles["Normal"], fontSize=10, leading=14, spaceAfter=4)
+    heading = ParagraphStyle("head", parent=styles["Normal"], fontSize=12, leading=16,
+                             fontName="Helvetica-Bold", spaceAfter=6, spaceBefore=10)
+    sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, leading=14,
+                         fontName="Helvetica-BoldOblique", spaceAfter=4)
+
+    story = []
+    for line in resume_text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            story.append(Spacer(1, 6))
+            continue
+        # Simple heuristic: ALL CAPS short line → section heading
+        if stripped.isupper() and len(stripped) < 60:
+            story.append(Paragraph(stripped, heading))
+        elif stripped.startswith("•") or stripped.startswith("-"):
+            bullet_text = stripped.lstrip("•-").strip()
+            story.append(Paragraph(f"• {bullet_text}", normal))
+        else:
+            story.append(Paragraph(stripped, normal))
+
+    try:
+        doc.build(story)
+    except Exception as e:
+        logger.warning(f"PDF build error: {e}; falling back to plain layout")
+        buf = io.BytesIO()
+        doc2 = SimpleDocTemplate(buf, pagesize=A4)
+        doc2.build([Paragraph(resume_text.replace("\n", "<br/>"), styles["Normal"])])
+
+    buf.seek(0)
+    return buf
 
 
 class ManualApplyRequest(BaseModel):

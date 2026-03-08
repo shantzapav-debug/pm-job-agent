@@ -1,5 +1,5 @@
 """
-FastAPI backend — Google Sheets as DB, Google Drive for files.
+FastAPI backend — Google Sheets as DB. Resume PDF lives in the container.
 """
 import json
 import logging
@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from agents.auto_apply import try_apply
 from agents.job_scraper import scrape_all_jobs
 from agents.resume_tailor import tailor_resume
-from drive_storage import create_folder_if_missing, upload_resume_pdf, upload_tailored_resume
 from sheets_db import PipelineState, SheetsDB, init_sheets
 
 load_dotenv()
@@ -37,10 +36,8 @@ def startup():
     try:
         init_sheets()
         logger.info("Google Sheets initialized")
-        upload_resume_pdf()
-        logger.info("Resume PDF in Drive")
     except Exception as e:
-        logger.warning(f"Startup setup skipped: {e}")
+        logger.warning(f"Sheets init skipped: {e}")
 
 
 # ─────────────── PIPELINE ───────────────
@@ -103,13 +100,6 @@ def run_pipeline(req: SearchRequest):
                 "apply_note": apply_note,
             }
             job_id = db.add_job(job_data)
-
-            # Upload tailored resume to Drive
-            if tailor_result["tailored_resume_text"] and os.getenv("GOOGLE_DRIVE_FOLDER_ID"):
-                try:
-                    upload_tailored_resume(job_id, raw["company"], tailor_result["tailored_resume_text"])
-                except Exception as e:
-                    logger.warning(f"Drive upload failed: {e}")
 
         ps.set(running=False, progress=f"Done — {tailored_count} tailored, {applied_count} applied",
                jobs_found=len(raw_jobs), jobs_tailored=tailored_count, jobs_applied=applied_count)
@@ -226,4 +216,4 @@ def get_status():
 
 @app.get("/")
 def root():
-    return {"status": "PM Job Agent API running", "version": "2.0 (Google Sheets + Drive)"}
+    return {"status": "PM Job Agent API running", "version": "2.0 (Google Sheets)"}

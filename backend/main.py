@@ -209,53 +209,35 @@ def run_pipeline(req: SearchRequest, user_id: str, resume_text: str):
     try:
         raw_jobs = scrape_all_jobs(req.keyword, req.location)
         raw_jobs = raw_jobs[:req.max_jobs]
-        ps.set(running=True, progress=f"Found {len(raw_jobs)} jobs. Tailoring...", jobs_found=len(raw_jobs))
+        ps.set(running=True, progress=f"Found {len(raw_jobs)} jobs. Saving...", jobs_found=len(raw_jobs))
 
         existing_ids = db.get_all_external_ids()
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        tailored_count = 0
-        applied_count = 0
+        saved_count = 0
 
         for idx, raw in enumerate(raw_jobs):
-            if idx % 5 == 0:
-                ps.set(running=True,
-                       progress=f"Tailoring {idx+1}/{len(raw_jobs)}: {raw['title'][:35]} @ {raw['company'][:20]}",
-                       jobs_found=len(raw_jobs), jobs_tailored=tailored_count, jobs_applied=applied_count)
-
             if raw["job_id_external"] in existing_ids:
                 continue
-
-            jd = raw.get("description", "")
-            tailor_result = {"tailored_resume_text": "", "original_resume_text": "",
-                             "changes_log": [], "change_percentage": 0.0, "keywords_added": []}
-
-            if jd and anthropic_key:
-                try:
-                    tailor_result = tailor_resume(
-                        jd, company=raw["company"], role=raw["title"],
-                        resume_text_override=resume_text or None,
-                        additional_requirements=req.additional_requirements,
-                    )
-                    tailored_count += 1
-                except Exception as e:
-                    logger.warning(f"Tailor failed: {e}")
-
-            applied = False
-            apply_note = "Ready — apply manually via link"
-            if req.auto_apply and raw.get("job_url"):
-                applied, apply_note = try_apply(raw["source"], raw["job_url"])
-                if applied:
-                    applied_count += 1
-
-            db.add_job({**raw, **tailor_result,
-                        "status": "applied" if applied else "manual",
-                        "applied_at": datetime.now(timezone.utc).isoformat() if applied else "",
-                        "apply_note": apply_note,
-                        "user_id": user_id})
+            db.add_job({
+                **raw,
+                "tailored_resume_text": "",
+                "original_resume_text": "",
+                "changes_log": [],
+                "change_percentage": 0.0,
+                "keywords_added": [],
+                "status": "manual",
+                "applied_at": "",
+                "apply_note": "Ready — tailor & apply manually via link",
+                "user_id": user_id,
+            })
+            saved_count += 1
+            if idx % 5 == 0:
+                ps.set(running=True,
+                       progress=f"Saved {saved_count} new jobs...",
+                       jobs_found=len(raw_jobs), jobs_tailored=0, jobs_applied=0)
 
         update_last_scrape(user_id)
-        ps.set(running=False, progress=f"Done — {tailored_count} tailored, {applied_count} applied",
-               jobs_found=len(raw_jobs), jobs_tailored=tailored_count, jobs_applied=applied_count)
+        ps.set(running=False, progress=f"Done — {saved_count} new jobs found. Tap a job to tailor your resume.",
+               jobs_found=len(raw_jobs), jobs_tailored=0, jobs_applied=saved_count)
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}")

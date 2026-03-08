@@ -157,6 +157,22 @@ class SheetsDB:
         self.ws.append_row([str(x) for x in row])
         return jid
 
+    _FOREIGN_LOC = {
+        "united states", "usa", "u.s.", "canada", "united kingdom", "uk",
+        "australia", "singapore", "germany", "netherlands", "france",
+        "seattle", "bellevue", "mountain view", "san francisco", "new york",
+        "boston", "chicago", "austin", "los angeles", "san jose", "sunnyvale",
+        "palo alto", "cupertino", "toronto", "london", "sydney", "dubai",
+        "remote, wa", "remote, ca", "remote, ny", "remote, tx",
+    }
+
+    def _is_india(self, loc: str) -> bool:
+        loc = loc.lower()
+        for term in self._FOREIGN_LOC:
+            if term in loc:
+                return False
+        return True
+
     def list_jobs(self, user_id=None, status=None, source=None, search=None) -> list:
         rows = self.ws.get_all_values()[1:]  # skip header
         result = []
@@ -166,6 +182,9 @@ class SheetsDB:
             d = _row_to_dict(r)
             # Filter by user — empty user_id rows belong to legacy/default user
             if user_id and d["user_id"] and d["user_id"] != user_id:
+                continue
+            # Drop non-India jobs
+            if d["location"] and not self._is_india(d["location"]):
                 continue
             if status and d["status"] != status:
                 continue

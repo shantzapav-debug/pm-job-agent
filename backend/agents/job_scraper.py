@@ -248,23 +248,35 @@ def _fetch_indeed_jd(job_id: str) -> str:
 
 # ─────────────────────────── MAIN ──────────────────────────────
 
-_US_CITIES = {
-    "seattle", "bellevue", "redmond", "mountain view", "san francisco", "sf",
-    "new york", "nyc", "boston", "chicago", "austin", "los angeles", "la",
-    "san jose", "sunnyvale", "menlo park", "palo alto", "cupertino",
-    "atlanta", "dallas", "denver", "miami", "phoenix", "portland",
-    "remote, wa", "remote, ca", "remote, ny", "remote, tx", "united states",
-    "washington, d.c.", "washington dc",
+_INDIA_TERMS = {
+    "bengaluru", "bangalore", "india", "mumbai", "delhi", "hyderabad",
+    "pune", "chennai", "kolkata", "noida", "gurgaon", "gurugram",
+    "ahmedabad", "jaipur", "kochi", "remote, india",
+}
+
+_FOREIGN_TERMS = {
+    "united states", "usa", "u.s.", "canada", "united kingdom", "uk",
+    "australia", "singapore", "germany", "netherlands", "france",
+    "seattle", "bellevue", "mountain view", "san francisco", "new york",
+    "boston", "chicago", "austin", "los angeles", "san jose", "sunnyvale",
+    "palo alto", "cupertino", "toronto", "london", "sydney", "dubai",
+    "remote, wa", "remote, ca", "remote, ny", "remote, tx",
 }
 
 
 def _is_india_job(job: dict) -> bool:
     loc = job.get("location", "").lower()
     if not loc:
-        return True  # unknown location — keep it
-    for city in _US_CITIES:
-        if city in loc:
+        return True  # unknown — keep it
+    # Immediately drop if a foreign term matches
+    for term in _FOREIGN_TERMS:
+        if term in loc:
             return False
+    # Keep if any India term matches
+    for term in _INDIA_TERMS:
+        if term in loc:
+            return True
+    # Location present but no known India term — keep (could be "HSR Layout" etc.)
     return True
 
 

@@ -25,7 +25,7 @@ HEADERS = {
 
 # ─────────────────────────── NAUKRI ────────────────────────────
 
-def scrape_naukri(keyword: str = "product manager", location: str = "bengaluru", pages: int = 3) -> list[dict]:
+def scrape_naukri(keyword: str = "product manager", location: str = "bengaluru", pages: int = 5) -> list[dict]:
     jobs = []
     session = requests.Session()
     session.headers.update({
@@ -40,6 +40,7 @@ def scrape_naukri(keyword: str = "product manager", location: str = "bengaluru",
             f"?noOfResults=20&urlType=search_by_keyword&searchType=adv"
             f"&keyword={keyword.replace(' ', '+')}&location={location}"
             f"&experience=3&pageNo={page}&k={keyword.replace(' ', '%20')}&l={location}"
+            f"&freshness=1"  # last 24 hours only
         )
         try:
             resp = session.get(url, timeout=15)
@@ -178,7 +179,7 @@ def scrape_indeed(keyword: str = "product manager", location: str = "Bengaluru, 
             f"?q={keyword.replace(' ', '+')}"
             f"&l={location.replace(' ', '+').replace(',', '%2C')}"
             f"&start={start}"
-            f"&fromage=14"
+            f"&fromage=1"  # last 24 hours only
         )
         try:
             resp = session.get(url, timeout=15)
@@ -281,19 +282,16 @@ def _is_india_job(job: dict) -> bool:
 
 
 def scrape_all_jobs(keyword: str = "product manager", location: str = "Bengaluru") -> list[dict]:
-    """Scrape PM jobs from all sources and deduplicate."""
+    """Scrape PM jobs from Naukri + Indeed (last 24 hours, India only).
+    LinkedIn removed — guest API returns US jobs and is too slow.
+    """
     all_jobs = []
-    logger.info("Scraping Naukri...")
-    all_jobs += scrape_naukri(keyword, location)
+    logger.info("Scraping Naukri (last 24h)...")
+    all_jobs += scrape_naukri(keyword, location.lower())
     logger.info(f"  Got {len(all_jobs)} Naukri jobs")
 
-    logger.info("Scraping LinkedIn...")
-    li_jobs = scrape_linkedin(keyword, location)
-    all_jobs += li_jobs
-    logger.info(f"  Got {len(li_jobs)} LinkedIn jobs")
-
-    logger.info("Scraping Indeed...")
-    in_jobs = scrape_indeed(keyword, location)
+    logger.info("Scraping Indeed India (last 24h)...")
+    in_jobs = scrape_indeed(keyword, location + ", Karnataka")
     all_jobs += in_jobs
     logger.info(f"  Got {len(in_jobs)} Indeed jobs")
 

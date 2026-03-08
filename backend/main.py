@@ -1,35 +1,66 @@
 """
-FastAPI backend — Google Sheets as DB. Resume PDF lives in the container.
+FastAPI backend — Google Sheets as DB, JWT auth, multi-user, rate limiting.
 """
+import io
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
+import pdfplumber
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from agents.auto_apply import try_apply
 from agents.job_scraper import scrape_all_jobs
 from agents.resume_tailor import tailor_resume
+from auth import (
+    SCRAPE_COOLDOWN_MINUTES, check_scrape_cooldown, create_token, create_user,
+    decode_token, get_user_by_email, get_user_by_id, update_last_scrape,
+    update_resume,
+)
 from sheets_db import PipelineState, SheetsDB, init_sheets
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Pavan Job Agent API", version="2.0")
+app = FastAPI(title="Pavan Job Agent API", version="3.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+bearer = HTTPBearer(auto_error=False)
 
+
+# ─────────────── AUTH HELPERS ───────────────
+
+def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    if not creds:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = decode_token(creds.credentials)
+        user = get_user_by_id(payload["sub"])
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def get_optional_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict | None:
+    if not creds:
+        return None
+    try:
+        payload = decode_token(creds.credentials)
+        return get_user_by_id(payload["sub"])
+    except Exception:
+        return None
+
+
+# ─────────────── STARTUP ───────────────
 
 @app.on_event("startup")
 def startup():
@@ -40,6 +71,114 @@ def startup():
         logger.warning(f"Sheets init skipped: {e}")
 
 
+# ─────────────── AUTH ROUTES ───────────────
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/signup")
+def signup(body: SignupRequest):
+    if get_user_by_email(body.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = create_user(body.email, body.password, body.name)
+    token = create_token(user["id"], user["email"])
+    return {"token": token, "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest):
+    from auth import verify_password
+    user = get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_token(user["id"], user["email"])
+    return {"token": token, "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(get_current_user)):
+    return {
+        "id": user["id"], "email": user["email"], "name": user["name"],
+        "target_role": user.get("target_role", ""), "target_location": user.get("target_location", ""),
+        "has_resume": bool(user.get("resume_text")),
+    }
+
+
+# ─────────────── RESUME UPLOAD ───────────────
+
+@app.post("/api/resume/upload")
+async def upload_resume(
+    file: UploadFile = File(...),
+    target_role: str = "product manager",
+    target_location: str = "Bengaluru",
+    user: dict = Depends(get_current_user),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files supported")
+
+    content = await file.read()
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            resume_text = "\n".join(p.extract_text() or "" for p in pdf.pages).strip()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
+
+    if len(resume_text) < 100:
+        raise HTTPException(status_code=400, detail="PDF appears empty or unreadable")
+
+    # Save resume + preferences
+    update_resume(user["id"], resume_text, target_role, target_location)
+
+    # Claude analyzes the resume and recommends roles + skill gaps
+    analysis = _analyze_resume(resume_text, target_role)
+
+    return {
+        "message": "Resume uploaded successfully",
+        "word_count": len(resume_text.split()),
+        "analysis": analysis,
+    }
+
+
+def _analyze_resume(resume_text: str, target_role: str) -> dict:
+    import anthropic
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"recommended_roles": [], "skill_gaps": [], "strengths": [], "summary": ""}
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""Analyze this resume for someone targeting "{target_role}" roles.
+
+Return ONLY valid JSON with this structure:
+{{
+  "summary": "<2-sentence summary of the candidate>",
+  "strengths": ["<strength1>", "<strength2>", "<strength3>"],
+  "recommended_roles": ["<role1>", "<role2>", "<role3>"],
+  "skill_gaps": ["<gap1>", "<gap2>", "<gap3>"],
+  "suggested_keywords": ["<kw1>", "<kw2>", "<kw3>"]
+}}
+
+Resume:
+{resume_text[:3000]}"""
+
+    try:
+        import re
+        msg = client.messages.create(model="claude-sonnet-4-6", max_tokens=800,
+                                     messages=[{"role": "user", "content": prompt}])
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", msg.content[0].text.strip())
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Resume analysis failed: {e}")
+        return {"summary": "", "strengths": [], "recommended_roles": [], "skill_gaps": [], "suggested_keywords": []}
+
+
 # ─────────────── PIPELINE ───────────────
 
 class SearchRequest(BaseModel):
@@ -47,9 +186,10 @@ class SearchRequest(BaseModel):
     location: str = "Bengaluru"
     max_jobs: int = 30
     auto_apply: bool = True
+    additional_requirements: Optional[str] = None  # user's extra requirements
 
 
-def run_pipeline(req: SearchRequest):
+def run_pipeline(req: SearchRequest, user_id: str, resume_text: str):
     db = SheetsDB()
     ps = PipelineState()
     ps.set(running=True, progress="Scraping jobs...", jobs_found=0, jobs_tailored=0, jobs_applied=0)
@@ -59,27 +199,16 @@ def run_pipeline(req: SearchRequest):
         raw_jobs = raw_jobs[:req.max_jobs]
         ps.set(running=True, progress=f"Found {len(raw_jobs)} jobs. Tailoring...", jobs_found=len(raw_jobs))
 
-        # Fetch all existing IDs once — avoids hitting Sheets rate limit
         existing_ids = db.get_all_external_ids()
-        logger.info(f"Existing jobs in sheet: {len(existing_ids)}")
-
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not anthropic_key:
-            logger.warning("ANTHROPIC_API_KEY not set — tailoring will be skipped")
-
         tailored_count = 0
         applied_count = 0
 
         for idx, raw in enumerate(raw_jobs):
-            # Update progress every 5 jobs to reduce Sheets API writes
             if idx % 5 == 0:
-                ps.set(
-                    running=True,
-                    progress=f"Tailoring {idx+1}/{len(raw_jobs)}: {raw['title'][:40]} @ {raw['company'][:20]}",
-                    jobs_found=len(raw_jobs),
-                    jobs_tailored=tailored_count,
-                    jobs_applied=applied_count,
-                )
+                ps.set(running=True,
+                       progress=f"Tailoring {idx+1}/{len(raw_jobs)}: {raw['title'][:35]} @ {raw['company'][:20]}",
+                       jobs_found=len(raw_jobs), jobs_tailored=tailored_count, jobs_applied=applied_count)
 
             if raw["job_id_external"] in existing_ids:
                 continue
@@ -88,9 +217,13 @@ def run_pipeline(req: SearchRequest):
             tailor_result = {"tailored_resume_text": "", "original_resume_text": "",
                              "changes_log": [], "change_percentage": 0.0, "keywords_added": []}
 
-            if jd and os.getenv("ANTHROPIC_API_KEY"):
+            if jd and anthropic_key:
                 try:
-                    tailor_result = tailor_resume(jd, company=raw["company"], role=raw["title"])
+                    tailor_result = tailor_resume(
+                        jd, company=raw["company"], role=raw["title"],
+                        resume_text_override=resume_text or None,
+                        additional_requirements=req.additional_requirements,
+                    )
                     tailored_count += 1
                 except Exception as e:
                     logger.warning(f"Tailor failed: {e}")
@@ -102,15 +235,13 @@ def run_pipeline(req: SearchRequest):
                 if applied:
                     applied_count += 1
 
-            job_data = {
-                **raw,
-                **tailor_result,
-                "status": "applied" if applied else "manual",
-                "applied_at": datetime.utcnow().isoformat() if applied else "",
-                "apply_note": apply_note,
-            }
-            job_id = db.add_job(job_data)
+            db.add_job({**raw, **tailor_result,
+                        "status": "applied" if applied else "manual",
+                        "applied_at": datetime.now(timezone.utc).isoformat() if applied else "",
+                        "apply_note": apply_note,
+                        "user_id": user_id})
 
+        update_last_scrape(user_id)
         ps.set(running=False, progress=f"Done — {tailored_count} tailored, {applied_count} applied",
                jobs_found=len(raw_jobs), jobs_tailored=tailored_count, jobs_applied=applied_count)
 
@@ -120,42 +251,48 @@ def run_pipeline(req: SearchRequest):
 
 
 @app.post("/api/jobs/search")
-async def search_jobs(req: SearchRequest, background_tasks: BackgroundTasks):
+async def search_jobs(req: SearchRequest, background_tasks: BackgroundTasks,
+                      user: dict = Depends(get_current_user)):
     ps = PipelineState()
     if ps.get()["running"]:
         raise HTTPException(status_code=409, detail="Pipeline already running")
-    background_tasks.add_task(run_pipeline, req)
+
+    can_scrape, next_at = check_scrape_cooldown(user)
+    if not can_scrape:
+        raise HTTPException(status_code=429, detail=f"Rate limited. Next scrape allowed at: {next_at}")
+
+    resume_text = user.get("resume_text", "")
+    background_tasks.add_task(run_pipeline, req, user["id"], resume_text)
     return {"message": "Pipeline started"}
 
 
 # ─────────────── JOBS ───────────────
 
 @app.get("/api/jobs")
-def list_jobs(status: Optional[str] = None, source: Optional[str] = None, search: Optional[str] = None):
+def list_jobs(status: Optional[str] = None, source: Optional[str] = None,
+              search: Optional[str] = None, user: dict = Depends(get_current_user)):
     db = SheetsDB()
-    jobs = db.list_jobs(status=status, source=source, search=search)
+    jobs = db.list_jobs(user_id=user["id"], status=status, source=source, search=search)
     return {"total": len(jobs), "jobs": jobs}
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: int):
+def get_job(job_id: int, user: dict = Depends(get_current_user)):
     db = SheetsDB()
-    job = db.get_job(job_id, include_resume=True)
+    job = db.get_job(job_id, include_resume=True, user_id=user["id"])
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
 
 @app.get("/api/jobs/{job_id}/resume")
-def get_resume(job_id: int):
+def get_resume(job_id: int, user: dict = Depends(get_current_user)):
     db = SheetsDB()
-    job = db.get_job(job_id, include_resume=True)
+    job = db.get_job(job_id, include_resume=True, user_id=user["id"])
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {
-        "job_id": job_id,
-        "title": job["title"],
-        "company": job["company"],
+        "job_id": job_id, "title": job["title"], "company": job["company"],
         "tailored_resume_text": job.get("tailored_resume_text", ""),
         "original_resume_text": job.get("original_resume_text", ""),
         "changes_log": job.get("changes_log", []),
@@ -169,16 +306,13 @@ class ManualApplyRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/apply")
-def mark_applied(job_id: int, body: ManualApplyRequest):
+def mark_applied(job_id: int, body: ManualApplyRequest, user: dict = Depends(get_current_user)):
     db = SheetsDB()
-    job = db.get_job(job_id)
-    if not job:
+    if not db.get_job(job_id, user_id=user["id"]):
         raise HTTPException(status_code=404, detail="Job not found")
-    db.update_job(job_id, {
-        "status": "applied",
-        "applied_at": datetime.utcnow().isoformat(),
-        "apply_note": body.note or "Applied manually",
-    })
+    db.update_job(job_id, {"status": "applied",
+                            "applied_at": datetime.now(timezone.utc).isoformat(),
+                            "apply_note": body.note or "Applied manually"})
     return {"message": "Marked as applied"}
 
 
@@ -187,17 +321,17 @@ class RetailorRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/retailor")
-def retailor_job(job_id: int, body: RetailorRequest):
+def retailor_job(job_id: int, body: RetailorRequest, user: dict = Depends(get_current_user)):
     db = SheetsDB()
-    job = db.get_job(job_id, include_resume=True)
+    job = db.get_job(job_id, include_resume=True, user_id=user["id"])
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     jd = body.jd_override or job.get("description", "")
     if not jd:
         raise HTTPException(status_code=400, detail="No JD available")
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY not set")
-    result = tailor_resume(jd, company=job["company"], role=job["title"])
+    resume_text = user.get("resume_text") or None
+    result = tailor_resume(jd, company=job["company"], role=job["title"],
+                           resume_text_override=resume_text)
     db.update_job(job_id, {
         "tailored_resume_text": result["tailored_resume_text"],
         "original_resume_text": result["original_resume_text"],
@@ -209,7 +343,7 @@ def retailor_job(job_id: int, body: RetailorRequest):
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: int):
+def delete_job(job_id: int, user: dict = Depends(get_current_user)):
     db = SheetsDB()
     db.delete_job(job_id)
     return {"message": "Deleted"}
@@ -218,21 +352,31 @@ def delete_job(job_id: int):
 # ─────────────── STATUS ───────────────
 
 @app.get("/api/status")
-def get_status():
+def get_status(user: dict = Depends(get_optional_user)):
     db = SheetsDB()
     ps = PipelineState()
-    return {"pipeline": ps.get(), "stats": db.stats()}
+    uid = user["id"] if user else None
+    can_scrape, next_at = check_scrape_cooldown(user) if user else (True, "")
+    return {
+        "pipeline": ps.get(),
+        "stats": db.stats(),
+        "scrape_cooldown": {
+            "can_scrape": can_scrape,
+            "next_scrape_at": next_at,
+            "cooldown_minutes": SCRAPE_COOLDOWN_MINUTES,
+        }
+    }
 
 
 @app.get("/api/config-check")
 def config_check():
-    """Check that all required env vars are set (values masked)."""
     return {
         "ANTHROPIC_API_KEY": "set" if os.getenv("ANTHROPIC_API_KEY") else "MISSING",
         "GOOGLE_SHEET_ID": "set" if os.getenv("GOOGLE_SHEET_ID") else "MISSING",
         "GOOGLE_SERVICE_ACCOUNT_JSON": "set" if os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") else "MISSING",
     }
 
+
 @app.get("/")
 def root():
-    return {"status": "PM Job Agent API running", "version": "2.0 (Google Sheets)"}
+    return {"status": "PM Job Agent API running", "version": "3.0 (multi-user + auth)"}

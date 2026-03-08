@@ -19,6 +19,7 @@ HEADERS = [
     "posted_date", "skills_required", "created_at",
     "tailored_resume_text", "original_resume_text", "changes_log",
     "change_percentage", "keywords_added", "status", "applied_at", "apply_note",
+    "user_id",   # index 21 — added for multi-user support
 ]
 
 
@@ -74,6 +75,7 @@ def _row_to_dict(row: list, include_resume=False) -> dict:
         "applied_at":          v(19) or None,
         "apply_note":          v(20) or None,
         "created_at":          v(12) or None,
+        "user_id":             v(21) or "",
     }
     if include_resume:
         d["tailored_resume_text"] = v(13)
@@ -143,17 +145,21 @@ class SheetsDB:
             data.get("status", "pending"),
             data.get("applied_at", ""),
             data.get("apply_note", ""),
+            data.get("user_id", ""),
         ]
         self.ws.append_row([str(x) for x in row])
         return jid
 
-    def list_jobs(self, status=None, source=None, search=None) -> list:
+    def list_jobs(self, user_id=None, status=None, source=None, search=None) -> list:
         rows = self.ws.get_all_values()[1:]  # skip header
         result = []
         for r in rows:
             if not r or not r[0]:
                 continue
             d = _row_to_dict(r)
+            # Filter by user — empty user_id rows belong to legacy/default user
+            if user_id and d["user_id"] and d["user_id"] != user_id:
+                continue
             if status and d["status"] != status:
                 continue
             if source and d["source"] != source:
@@ -165,11 +171,14 @@ class SheetsDB:
             result.append(d)
         return list(reversed(result))
 
-    def get_job(self, job_id: int, include_resume=False) -> dict | None:
+    def get_job(self, job_id: int, include_resume=False, user_id=None) -> dict | None:
         rows = self.ws.get_all_values()[1:]
         for r in rows:
             if r and r[0] == str(job_id):
-                return _row_to_dict(r, include_resume=include_resume)
+                d = _row_to_dict(r, include_resume=include_resume)
+                if user_id and d["user_id"] and d["user_id"] != user_id:
+                    return None  # not this user's job
+                return d
         return None
 
     def update_job(self, job_id: int, updates: dict):

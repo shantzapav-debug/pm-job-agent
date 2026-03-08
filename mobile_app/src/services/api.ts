@@ -1,12 +1,32 @@
 import Constants from 'expo-constants';
 import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// In production (APK), reads from app.json extra.apiBase (your Render URL).
-// In dev (Expo Go on same WiFi), falls back to local IP.
 export const API_BASE: string =
   Constants.expoConfig?.extra?.apiBase ?? 'http://192.168.1.8:8000';
 
 const api = axios.create({ baseURL: API_BASE, timeout: 30000 });
+
+// Attach JWT token to every request
+api.interceptors.request.use(async (config) => {
+  const token = await AsyncStorage.getItem('auth_token');
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// ─── Types ───────────────────────────────────────────────────────
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  target_role: string;
+  target_location: string;
+  has_resume: boolean;
+}
 
 export interface Job {
   id: number;
@@ -66,7 +86,46 @@ export interface StatusData {
     pending: number;
     tailored: number;
   };
+  scrape_cooldown: {
+    can_scrape: boolean;
+    next_scrape_at: string;
+    cooldown_minutes: number;
+  };
 }
+
+export interface ResumeAnalysis {
+  summary: string;
+  strengths: string[];
+  recommended_roles: string[];
+  skill_gaps: string[];
+  suggested_keywords: string[];
+}
+
+// ─── Auth API ────────────────────────────────────────────────────
+
+export const authApi = {
+  signup: (email: string, password: string, name: string) =>
+    api.post<{ token: string; user: User }>('/api/auth/signup', { email, password, name }),
+
+  login: (email: string, password: string) =>
+    api.post<{ token: string; user: User }>('/api/auth/login', { email, password }),
+
+  me: () => api.get<User>('/api/auth/me'),
+
+  uploadResume: async (fileUri: string, fileName: string, targetRole: string, targetLocation: string) => {
+    const form = new FormData();
+    form.append('file', { uri: fileUri, name: fileName, type: 'application/pdf' } as any);
+    form.append('target_role', targetRole);
+    form.append('target_location', targetLocation);
+    return api.post<{ message: string; word_count: number; analysis: ResumeAnalysis }>(
+      '/api/resume/upload',
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+  },
+};
+
+// ─── Jobs API ────────────────────────────────────────────────────
 
 export const jobsApi = {
   list: (params?: { status?: string; source?: string; search?: string }) =>
@@ -76,8 +135,13 @@ export const jobsApi = {
 
   resume: (id: number) => api.get<ResumeData>(`/api/jobs/${id}/resume`),
 
-  search: (body: { keyword?: string; location?: string; max_jobs?: number; auto_apply?: boolean }) =>
-    api.post('/api/jobs/search', body),
+  search: (body: {
+    keyword?: string;
+    location?: string;
+    max_jobs?: number;
+    auto_apply?: boolean;
+    additional_requirements?: string;
+  }) => api.post('/api/jobs/search', body),
 
   markApplied: (id: number, note?: string) =>
     api.post(`/api/jobs/${id}/apply`, { note: note || 'Applied manually' }),

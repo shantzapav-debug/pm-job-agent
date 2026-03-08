@@ -92,7 +92,7 @@ def scrape_linkedin(keyword: str = "product manager", location: str = "Bengaluru
         params = {
             "keywords": keyword,
             "location": location,
-            "geoId": "1269750",   # India
+            "geoId": "105556991",  # Bengaluru, Karnataka, India
             "trk": "public_jobs_jobs-search-bar_search-submit",
             "position": 1,
             "pageNum": 0,
@@ -248,6 +248,26 @@ def _fetch_indeed_jd(job_id: str) -> str:
 
 # ─────────────────────────── MAIN ──────────────────────────────
 
+_US_CITIES = {
+    "seattle", "bellevue", "redmond", "mountain view", "san francisco", "sf",
+    "new york", "nyc", "boston", "chicago", "austin", "los angeles", "la",
+    "san jose", "sunnyvale", "menlo park", "palo alto", "cupertino",
+    "atlanta", "dallas", "denver", "miami", "phoenix", "portland",
+    "remote, wa", "remote, ca", "remote, ny", "remote, tx", "united states",
+    "washington, d.c.", "washington dc",
+}
+
+
+def _is_india_job(job: dict) -> bool:
+    loc = job.get("location", "").lower()
+    if not loc:
+        return True  # unknown location — keep it
+    for city in _US_CITIES:
+        if city in loc:
+            return False
+    return True
+
+
 def scrape_all_jobs(keyword: str = "product manager", location: str = "Bengaluru") -> list[dict]:
     """Scrape PM jobs from all sources and deduplicate."""
     all_jobs = []
@@ -264,6 +284,11 @@ def scrape_all_jobs(keyword: str = "product manager", location: str = "Bengaluru
     in_jobs = scrape_indeed(keyword, location)
     all_jobs += in_jobs
     logger.info(f"  Got {len(in_jobs)} Indeed jobs")
+
+    # Filter out US-located jobs
+    before = len(all_jobs)
+    all_jobs = [j for j in all_jobs if _is_india_job(j)]
+    logger.info(f"  Dropped {before - len(all_jobs)} non-India jobs")
 
     # Deduplicate by external ID
     seen = set()

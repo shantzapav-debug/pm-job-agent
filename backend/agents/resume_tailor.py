@@ -89,15 +89,21 @@ Return ONLY a valid JSON object with this exact structure:
 }}"""
 
 
-def tailor_resume(job_description: str, company: str = "", role: str = "") -> dict:
+def tailor_resume(job_description: str, company: str = "", role: str = "",
+                  resume_text_override: str = None, additional_requirements: str = None) -> dict:
     """
     Tailor the resume for a given JD.
     Returns dict with tailored_text, changes, keywords_added, change_percentage.
+    resume_text_override: use this text instead of reading PDF from disk.
+    additional_requirements: extra instructions to append to the prompt.
     """
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    original_text = extract_resume_text()
+    original_text = resume_text_override if resume_text_override else extract_resume_text()
 
-    prompt = TAILOR_PROMPT.format(jd=job_description[:4000], resume=original_text)
+    base_prompt = TAILOR_PROMPT.format(jd=job_description[:4000], resume=original_text)
+    if additional_requirements:
+        base_prompt += f"\n\nAdditional requirements from the applicant:\n{additional_requirements}"
+    prompt = base_prompt
 
     try:
         message = client.messages.create(

@@ -7,6 +7,15 @@ import {
 import StatusBadge from '../components/StatusBadge';
 import { Job, StatusData, jobsApi } from '../services/api';
 
+function formatCooldown(isoString: string): string {
+  if (!isoString) return '';
+  const diff = new Date(isoString).getTime() - Date.now();
+  if (diff <= 0) return '';
+  const mins = Math.ceil(diff / 60000);
+  if (mins >= 60) return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+
 const FILTER_TABS = ['All', 'Manual', 'Applied', 'Pending'];
 const LAST_SEARCH_KEY = 'last_search_params';
 
@@ -65,8 +74,28 @@ export default function HomeScreen({ navigation }: any) {
     fetchStatus();
   }, []);
 
+  // ─── Logout ───
+  const handleLogout = () => {
+    Alert.alert('Logout', 'Sign out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Logout', style: 'destructive', onPress: async () => {
+          await AsyncStorage.removeItem('auth_token');
+          await AsyncStorage.removeItem('auth_user');
+          navigation.replace('Login');
+        },
+      },
+    ]);
+  };
+
   // ─── Start pipeline (with params) ───
   const startPipeline = async (keyword: string, location: string) => {
+    if (status?.scrape_cooldown && !status.scrape_cooldown.can_scrape) {
+      const remaining = formatCooldown(status.scrape_cooldown.next_scrape_at);
+      Alert.alert('Rate Limited', `Next scrape allowed in ${remaining}. LinkedIn restricts frequent scraping.`);
+      setPipelineModal(false);
+      return;
+    }
     try {
       await jobsApi.search({ keyword, location, max_jobs: 30, auto_apply: true });
       await AsyncStorage.setItem(LAST_SEARCH_KEY, JSON.stringify({ keyword, location }));
@@ -82,6 +111,11 @@ export default function HomeScreen({ navigation }: any) {
   const quickRefresh = async () => {
     if (status?.pipeline.running) {
       Alert.alert('Already Running', 'A scrape is already in progress.');
+      return;
+    }
+    if (status?.scrape_cooldown && !status.scrape_cooldown.can_scrape) {
+      const remaining = formatCooldown(status.scrape_cooldown.next_scrape_at);
+      Alert.alert('Rate Limited', `Next scrape in ${remaining}. LinkedIn blocks frequent bot access.`);
       return;
     }
     Alert.alert(
@@ -140,6 +174,10 @@ export default function HomeScreen({ navigation }: any) {
           </Text>
         </View>
         <View style={styles.headerBtns}>
+          {/* Logout */}
+          <TouchableOpacity style={styles.iconBtn} onPress={handleLogout}>
+            <Text style={styles.iconBtnText}>⎋</Text>
+          </TouchableOpacity>
           {/* Refresh button */}
           <TouchableOpacity
             style={[styles.iconBtn, isPipelineRunning && styles.iconBtnDisabled]}
@@ -168,6 +206,15 @@ export default function HomeScreen({ navigation }: any) {
           <Text style={styles.bannerText} numberOfLines={1}>{status?.pipeline.progress}</Text>
           <Text style={styles.bannerCount}>
             {status?.pipeline.jobs_tailored ?? 0}/{status?.pipeline.jobs_found ?? 0}
+          </Text>
+        </View>
+      )}
+
+      {/* Scrape cooldown banner */}
+      {!isPipelineRunning && status?.scrape_cooldown && !status.scrape_cooldown.can_scrape && (
+        <View style={styles.cooldownBanner}>
+          <Text style={styles.cooldownText}>
+            Next scrape in {formatCooldown(status.scrape_cooldown.next_scrape_at)} · LinkedIn rate limit
           </Text>
         </View>
       )}
@@ -283,4 +330,6 @@ const styles = StyleSheet.create({
   modalNote: { backgroundColor: '#f0fdf4', borderRadius: 8, padding: 12, fontSize: 13, color: '#166534', marginBottom: 16, lineHeight: 20 },
   startBtn: { backgroundColor: '#2563eb', paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
   startBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  cooldownBanner: { backgroundColor: '#fef3c7', borderBottomWidth: 1, borderBottomColor: '#fde68a', paddingHorizontal: 16, paddingVertical: 6 },
+  cooldownText: { fontSize: 12, color: '#92400e', textAlign: 'center', fontWeight: '500' },
 });

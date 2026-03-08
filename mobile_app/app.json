@@ -19,7 +19,7 @@
       "package": "com.pavanram.pmjobagent",
       "adaptiveIcon": {
         "backgroundColor": "#2563eb",
-        "foregroundImage": "./assets/adaptive-icon.png"
+        "foregroundImage": "./assets/android-icon-foreground.png"
       }
     },
     "web": {
@@ -28,8 +28,9 @@
     "extra": {
       "apiBase": "https://pm-job-agent-790550494034.asia-south1.run.app",
       "eas": {
-        "projectId": "YOUR_EAS_PROJECT_ID"
+        "projectId": "204e0194-981b-4201-a87b-48f939f356a5"
       }
-    }
+    },
+    "owner": "shantzapav"
   }
 }

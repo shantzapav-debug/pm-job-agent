@@ -6,7 +6,7 @@
     "preview": {
       "android": {
         "buildType": "apk",
-        "gradleCommand": ":app:assembleRelease"
+        "credentialsSource": "local"
       }
     },
     "production": {

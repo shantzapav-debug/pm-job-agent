@@ -2,12 +2,14 @@
 Auth module — JWT + user management via Google Sheets.
 Users sheet columns: id | email | password_hash | name | created_at | last_scrape_at | resume_text | target_role | target_location
 """
+import base64
+import hashlib
+import hmac
 import json
 import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from passlib.context import CryptContext
 
 from sheets_db import _get_sheet
 
@@ -16,7 +18,22 @@ ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 72
 SCRAPE_COOLDOWN_MINUTES = 60
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _hash_password(password: str) -> str:
+    """PBKDF2-HMAC-SHA256, no 72-byte bcrypt limit."""
+    salt = os.urandom(32)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return base64.b64encode(salt + key).decode("utf-8")
+
+
+def verify_password(plain: str, stored: str) -> bool:
+    try:
+        raw = base64.b64decode(stored.encode("utf-8"))
+        salt, stored_key = raw[:32], raw[32:]
+        key = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, 200_000)
+        return hmac.compare_digest(key, stored_key)
+    except Exception:
+        return False
 
 USER_HEADERS = ["id", "email", "password_hash", "name", "created_at",
                 "last_scrape_at", "resume_text", "target_role", "target_location"]
@@ -68,15 +85,12 @@ def create_user(email: str, password: str, name: str) -> dict:
     ws = _users_sheet()
     rows = ws.get_all_values()[1:]
     next_id = str(len(rows) + 1)
-    pw_hash = pwd_ctx.hash(password)
+    pw_hash = _hash_password(password)
     now = datetime.now(timezone.utc).isoformat()
     row = [next_id, email, pw_hash, name, now, "", "", "product manager", "Bengaluru"]
     ws.append_row(row)
     return {"id": next_id, "email": email, "name": name}
 
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
 
 
 def create_token(user_id: str, email: str) -> str:

@@ -86,24 +86,40 @@ class SheetsDB:
     def __init__(self):
         self.wb = _get_sheet()
         self.ws = self.wb.worksheet("Jobs")
+        # Cache all rows in memory for the lifetime of this instance
+        # to avoid repeated API calls (rate limit = 300 reads/min)
+        self._cache: list[list] | None = None
+
+    def _all_rows(self) -> list[list]:
+        if self._cache is None:
+            self._cache = self.ws.get_all_values()
+        return self._cache
+
+    def _invalidate_cache(self):
+        self._cache = None
 
     def _next_id(self):
-        all_rows = self.ws.get_all_values()
-        if len(all_rows) <= 1:
+        rows = self._all_rows()
+        if len(rows) <= 1:
             return 1
         ids = []
-        for r in all_rows[1:]:
+        for r in rows[1:]:
             try:
                 ids.append(int(r[0]))
             except (ValueError, IndexError):
                 pass
         return max(ids) + 1 if ids else 1
 
+    def get_all_external_ids(self) -> set:
+        """Return set of all existing job_id_external values — single API call."""
+        rows = self._all_rows()
+        return {r[6] for r in rows[1:] if len(r) > 6 and r[6]}
+
     def job_exists(self, job_id_external: str) -> bool:
-        col = self.ws.col_values(7)  # job_id_external column
-        return job_id_external in col
+        return job_id_external in self.get_all_external_ids()
 
     def add_job(self, data: dict) -> int:
+        self._invalidate_cache()  # force fresh read after write
         jid = self._next_id()
         row = [
             jid,

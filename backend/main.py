@@ -59,19 +59,29 @@ def run_pipeline(req: SearchRequest):
         raw_jobs = raw_jobs[:req.max_jobs]
         ps.set(running=True, progress=f"Found {len(raw_jobs)} jobs. Tailoring...", jobs_found=len(raw_jobs))
 
+        # Fetch all existing IDs once — avoids hitting Sheets rate limit
+        existing_ids = db.get_all_external_ids()
+        logger.info(f"Existing jobs in sheet: {len(existing_ids)}")
+
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not anthropic_key:
+            logger.warning("ANTHROPIC_API_KEY not set — tailoring will be skipped")
+
         tailored_count = 0
         applied_count = 0
 
         for idx, raw in enumerate(raw_jobs):
-            ps.set(
-                running=True,
-                progress=f"Tailoring {idx+1}/{len(raw_jobs)}: {raw['title'][:40]} @ {raw['company'][:20]}",
-                jobs_found=len(raw_jobs),
-                jobs_tailored=tailored_count,
-                jobs_applied=applied_count,
-            )
+            # Update progress every 5 jobs to reduce Sheets API writes
+            if idx % 5 == 0:
+                ps.set(
+                    running=True,
+                    progress=f"Tailoring {idx+1}/{len(raw_jobs)}: {raw['title'][:40]} @ {raw['company'][:20]}",
+                    jobs_found=len(raw_jobs),
+                    jobs_tailored=tailored_count,
+                    jobs_applied=applied_count,
+                )
 
-            if db.job_exists(raw["job_id_external"]):
+            if raw["job_id_external"] in existing_ids:
                 continue
 
             jd = raw.get("description", "")
@@ -213,6 +223,15 @@ def get_status():
     ps = PipelineState()
     return {"pipeline": ps.get(), "stats": db.stats()}
 
+
+@app.get("/api/config-check")
+def config_check():
+    """Check that all required env vars are set (values masked)."""
+    return {
+        "ANTHROPIC_API_KEY": "set" if os.getenv("ANTHROPIC_API_KEY") else "MISSING",
+        "GOOGLE_SHEET_ID": "set" if os.getenv("GOOGLE_SHEET_ID") else "MISSING",
+        "GOOGLE_SERVICE_ACCOUNT_JSON": "set" if os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") else "MISSING",
+    }
 
 @app.get("/")
 def root():

@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: pavan-job-agent-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium --with-deps
+    startCommand: gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # you set this manually in Render dashboard
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pavan-jobs-db
+          property: connectionString
+      - key: LINKEDIN_EMAIL
+        sync: false
+      - key: LINKEDIN_PASSWORD
+        sync: false
+    healthCheckPath: /api/status
+
+databases:
+  - name: pavan-jobs-db
+    databaseName: pavan_jobs
+    plan: free               # Render free PostgreSQL (90 days then $7/mo)

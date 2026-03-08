@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+*.sqlite3
+venv/
+.venv/
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+build/
+*.apk
+*.aab
+android/
+ios/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep resume in repo (needed for cloud deploy)
+# !backend/resume/Pavan_Ram_Resume_1.pdf
